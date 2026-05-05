@@ -140,21 +140,24 @@
     }
 
 async function performOCR(page) {
-    // 1. 強制提高渲染倍率 (Scale 3.0)，將圖片放大三倍來讀，提高精細度
-    const viewport = page.getViewport({ scale: 3.0 }); 
+    // 1. 設定縮放倍率
+    const scale = 3.0;
+    const viewport = page.getViewport({ scale: scale }); 
     const context = ocrCanvas.getContext('2d');
-    ocrCanvas.height = viewport.height;
-    ocrCanvas.width = viewport.width;
 
+    // 【範圍優化備註：僅抓取左上角 25% 區域】
+    // 透過設定 Canvas 的寬高為 Viewport 的 50%，達成裁切左上角 1/4 面積的效果
+    ocrCanvas.width = viewport.width * 0.5;   // 寬度取 50%
+    ocrCanvas.height = viewport.height * 0.5; // 高度取 50%
+
+    // 渲染 PDF 頁面至 Canvas。由於 Canvas 尺寸已縮小，PDF.js 會自動裁切掉超出邊界的區域
     await page.render({ canvasContext: context, viewport: viewport }).promise;
 
-    // 2. 圖像預處理：轉為黑白高對比 (影像處理邏輯)
+    // 2. 圖像預處理：轉為黑白高對比
     const imgData = context.getImageData(0, 0, ocrCanvas.width, ocrCanvas.height);
     const pixels = imgData.data;
     for (let i = 0; i < pixels.length; i += 4) {
-        // 計算灰階值
         const avg = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
-        // 二值化：低於 128 變黑，高於 128 變白，去除灰色陰影干擾
         const threshold = 128;
         const v = avg < threshold ? 0 : 255;
         pixels[i] = pixels[i+1] = pixels[i+2] = v;
@@ -164,7 +167,6 @@ async function performOCR(page) {
     // 3. 執行辨識
     const imageData = ocrCanvas.toDataURL('image/png');
     const { data: { text } } = await Tesseract.recognize(imageData, 'eng+chi_tra', {
-        // 設定限定僅搜尋英數字，避免誤判為亂碼中文字
         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-:'
     });
     return text;
