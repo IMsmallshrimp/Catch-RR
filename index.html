@@ -18,6 +18,8 @@
         table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
         th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
         th { background-color: #f8f9fa; position: sticky; top: 0; }
+        /* 增加手動修正時的視覺提示 */
+        .editable-cell:focus { background-color: #fff9c4; outline: 2px solid #fbc02d; }
         .btn-group { margin-top: 20px; display: flex; gap: 10px; }
         button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; transition: 0.2s; font-weight: bold; }
         .btn-copy { background-color: #3498db; color: white; }
@@ -31,7 +33,7 @@
 
 <div class="container">
     <h1>RR 單號自動提取工具</h1>
-    <p>支援多頁 PDF 自動翻頁與圖片辨識。請直接上傳掃描檔，系統將自動處理所有頁面。</p>
+    <p>支援多頁 PDF 自動翻頁與圖片辨識。請直接上傳掃描檔。**若辨識有誤，可直接點擊表格內的單號進行修正。**</p>
 
     <div class="upload-section" onclick="document.getElementById('fileInput').click()">
         點擊此處或拖曳 PDF 檔案至此 (支援多檔案上傳)
@@ -51,7 +53,7 @@
                 <th>來源檔名</th>
                 <th>頁次</th>
                 <th>辨識方式</th>
-                <th>客戶維修單號</th>
+                <th>客戶維修單號 (可點擊修正)</th>
             </tr>
         </thead>
         <tbody></tbody>
@@ -91,7 +93,7 @@
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
-            await processFile(file);
+            await processFile(file, i);
         }
 
         status.innerText = `處理完成！共偵測到 ${results.filter(r => r.sn !== '未找到').length} 組單號。`;
@@ -100,7 +102,7 @@
         fileInput.disabled = false;
     });
 
-    async function processFile(file) {
+    async function processFile(file, fileIdx) {
         try {
             const arrayBuffer = await file.arrayBuffer();
             const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
@@ -109,27 +111,32 @@
                 status.innerText = `正在處理：${file.name} (第 ${pageNum}/${pdf.numPages} 頁)`;
                 const page = await pdf.getPage(pageNum);
                 
-                // 1. 嘗試提取文字層
                 let textContent = await page.getTextContent();
                 let text = textContent.items.map(item => item.str).join(" ");
                 let method = "文字層";
 
-                // 2. 如果沒文字，啟動 OCR
                 if (text.replace(/\s+/g, '').length < 5) {
                     method = "圖片辨識 (OCR)";
                     text = await performOCR(page);
                 }
 
-                // 3. 搜尋單號
                 const sn = findMatch(text);
                 
-                // 4. 紀錄與渲染
+                // 紀錄結果
+                const resultIndex = results.length;
                 results.push({ fileName: file.name, page: pageNum, sn: sn || '未找到', method });
+
+                // 【修正功能：加入 contenteditable 與監聽】
                 const row = `<tr>
                     <td>${file.name}</td>
                     <td>第 ${pageNum} 頁</td>
                     <td>${method === "圖片辨識 (OCR)" ? '<span class="tag-ocr">OCR</span>' : '文字'}</td>
-                    <td style="${!sn ? 'color:red' : 'font-weight:bold'}">${sn || '未找到'}</td>
+                    <td contenteditable="true" 
+                        class="editable-cell" 
+                        oninput="updateResult(${resultIndex}, this.innerText)"
+                        style="${!sn ? 'color:red' : 'font-weight:bold'}">
+                        ${sn || '未找到'}
+                    </td>
                 </tr>`;
                 tbody.insertAdjacentHTML('beforeend', row);
             }
@@ -139,32 +146,35 @@
         }
     }
 
+    // 【修正同步：當你手動修改表格時，同步更新背後的資料陣列】
+    function updateResult(index, newSn) {
+        if (results[index]) {
+            results[index].sn = newSn.trim();
+        }
+    }
+
 async function performOCR(page) {
-    // 1. 設定縮放倍率
     const scale = 3.0;
     const viewport = page.getViewport({ scale: scale }); 
     const context = ocrCanvas.getContext('2d');
 
     // 【範圍優化備註：僅抓取左上角 25% 區域】
-    // 透過設定 Canvas 的寬高為 Viewport 的 50%，達成裁切左上角 1/4 面積的效果
-    ocrCanvas.width = viewport.width * 0.5;   // 寬度取 50%
-    ocrCanvas.height = viewport.height * 0.5; // 高度取 50%
+    ocrCanvas.width = viewport.width * 0.5;
+    ocrCanvas.height = viewport.height * 0.5;
 
-    // 渲染 PDF 頁面至 Canvas。由於 Canvas 尺寸已縮小，PDF.js 會自動裁切掉超出邊界的區域
     await page.render({ canvasContext: context, viewport: viewport }).promise;
 
-    // 2. 圖像預處理：轉為黑白高對比
     const imgData = context.getImageData(0, 0, ocrCanvas.width, ocrCanvas.height);
     const pixels = imgData.data;
     for (let i = 0; i < pixels.length; i += 4) {
         const avg = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
-        const threshold = 128;
+        // 【二值化優化：將門檻稍微調高至 145，讓字體邊緣更乾淨，減少 2 和 3 的混淆】
+        const threshold = 145; 
         const v = avg < threshold ? 0 : 255;
         pixels[i] = pixels[i+1] = pixels[i+2] = v;
     }
     context.putImageData(imgData, 0, 0);
 
-    // 3. 執行辨識
     const imageData = ocrCanvas.toDataURL('image/png');
     const { data: { text } } = await Tesseract.recognize(imageData, 'eng+chi_tra', {
         tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-:'
@@ -182,8 +192,9 @@ async function performOCR(page) {
     }
 
     copyBtn.addEventListener('click', () => {
+        // 抓取當前結果陣列（包含你手動修正過的內容）
         const text = results.filter(r => r.sn !== '未找到').map(r => r.sn).join('\n');
-        navigator.clipboard.writeText(text).then(() => alert('已複製所有找到的 RR 單號'));
+        navigator.clipboard.writeText(text).then(() => alert('已複製所有找到的 RR 單號（含手動修正內容）'));
     });
 
     downloadBtn.addEventListener('click', () => {
