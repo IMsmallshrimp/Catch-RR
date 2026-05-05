@@ -139,18 +139,36 @@
         }
     }
 
-    async function performOCR(page) {
-        const viewport = page.getViewport({ scale: 2.0 }); // 提高解析度增加辨識率
-        const context = ocrCanvas.getContext('2d');
-        ocrCanvas.height = viewport.height;
-        ocrCanvas.width = viewport.width;
+async function performOCR(page) {
+    // 1. 強制提高渲染倍率 (Scale 3.0)，將圖片放大三倍來讀，提高精細度
+    const viewport = page.getViewport({ scale: 3.0 }); 
+    const context = ocrCanvas.getContext('2d');
+    ocrCanvas.height = viewport.height;
+    ocrCanvas.width = viewport.width;
 
-        await page.render({ canvasContext: context, viewport: viewport }).promise;
-        const imageData = ocrCanvas.toDataURL('image/png');
-        
-        const { data: { text } } = await Tesseract.recognize(imageData, 'chi_tra+eng');
-        return text;
+    await page.render({ canvasContext: context, viewport: viewport }).promise;
+
+    // 2. 圖像預處理：轉為黑白高對比 (影像處理邏輯)
+    const imgData = context.getImageData(0, 0, ocrCanvas.width, ocrCanvas.height);
+    const pixels = imgData.data;
+    for (let i = 0; i < pixels.length; i += 4) {
+        // 計算灰階值
+        const avg = (pixels[i] + pixels[i+1] + pixels[i+2]) / 3;
+        // 二值化：低於 128 變黑，高於 128 變白，去除灰色陰影干擾
+        const threshold = 128;
+        const v = avg < threshold ? 0 : 255;
+        pixels[i] = pixels[i+1] = pixels[i+2] = v;
     }
+    context.putImageData(imgData, 0, 0);
+
+    // 3. 執行辨識
+    const imageData = ocrCanvas.toDataURL('image/png');
+    const { data: { text } } = await Tesseract.recognize(imageData, 'eng+chi_tra', {
+        // 設定限定僅搜尋英數字，避免誤判為亂碼中文字
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-:'
+    });
+    return text;
+}
 
     function findMatch(text) {
         const cleanText = text.replace(/\s+/g, ' ').replace(/：/g, ':').trim();
