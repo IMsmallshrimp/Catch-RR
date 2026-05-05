@@ -3,39 +3,42 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF 維修單號自動抓取工具</title>
+    <title>RR 單號自動提取工具 - 終極自動化版</title>
+    <!-- 引入 PDF.js 與 Tesseract.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; padding: 20px; background-color: #f5f7f9; color: #333; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         h1 { color: #2c3e50; font-size: 24px; border-left: 5px solid #3498db; padding-left: 15px; }
         .upload-section { border: 2px dashed #3498db; padding: 40px; text-align: center; border-radius: 8px; margin: 20px 0; cursor: pointer; transition: 0.3s; }
         .upload-section:hover { background-color: #ebf5fb; }
         #fileInput { display: none; }
-        .status { margin: 10px 0; font-weight: bold; color: #e67e22; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .status { margin: 10px 0; font-weight: bold; color: #e67e22; min-height: 1.6em; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
         th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-        th { background-color: #f8f9fa; }
+        th { background-color: #f8f9fa; position: sticky; top: 0; }
         .btn-group { margin-top: 20px; display: flex; gap: 10px; }
-        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; transition: 0.2s; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; transition: 0.2s; font-weight: bold; }
         .btn-copy { background-color: #3498db; color: white; }
         .btn-download { background-color: #27ae60; color: white; }
         button:hover { opacity: 0.8; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .tag-ocr { background: #e74c3c; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; margin-left: 5px; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>PDF 維修單號自動抓取工具</h1>
-    <p>請上傳維修單 PDF 檔案，系統將自動提取「客戶維修單號」。</p>
+    <h1>RR 單號自動提取工具</h1>
+    <p>支援多頁 PDF 自動翻頁與圖片辨識。請直接上傳掃描檔，系統將自動處理所有頁面。</p>
 
     <div class="upload-section" onclick="document.getElementById('fileInput').click()">
-        點擊此處或拖曳多個 PDF 檔案至此
+        點擊此處或拖曳 PDF 檔案至此 (支援多檔案上傳)
         <input type="file" id="fileInput" accept="application/pdf" multiple>
     </div>
 
-    <div id="status" class="status"></div>
+    <div id="status" class="status">等待上傳...</div>
 
     <div class="btn-group">
         <button id="copyBtn" class="btn-copy" disabled>複製單號列表</button>
@@ -45,17 +48,19 @@
     <table id="resultTable">
         <thead>
             <tr>
-                <th>檔名</th>
+                <th>來源檔名</th>
+                <th>頁次</th>
+                <th>辨識方式</th>
                 <th>客戶維修單號</th>
             </tr>
         </thead>
-        <tbody>
-            </tbody>
+        <tbody></tbody>
     </table>
 </div>
 
+<canvas id="ocrCanvas" style="display:none;"></canvas>
+
 <script>
-    // 設定 PDF.js 工作 worker
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
 
     const fileInput = document.getElementById('fileInput');
@@ -63,124 +68,113 @@
     const tbody = document.querySelector('#resultTable tbody');
     const copyBtn = document.getElementById('copyBtn');
     const downloadBtn = document.getElementById('downloadBtn');
+    const ocrCanvas = document.getElementById('ocrCanvas');
 
     let results = [];
+    const patterns = [
+        /客戶維修單號\s*:?\s*.*?(RR\d{8,})/i,
+        /維修單號\s*:?\s*(RR\d{8,})/i,
+        /單號\s*:?\s*(RR\d{8,})/i,
+        /\b(RR\d{8,})\b/i,
+        /\b(RMA\d{6,})\b/i,
+        /\b(REP\d{6,})\b/i
+    ];
 
     fileInput.addEventListener('change', async (e) => {
         const files = e.target.files;
         if (files.length === 0) return;
 
-        status.innerText = `正在初始化處理 ${files.length} 個檔案...`;
+        status.innerText = `準備處理 ${files.length} 個檔案...`;
         tbody.innerHTML = '';
         results = [];
-        
+        fileInput.disabled = true;
+
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
-            status.innerText = `正在處理 (${i + 1}/${files.length}): ${file.name}`;
-            
-            try {
-                const serialNumber = await extractSerialNumber(file);
-                results.push({ fileName: file.name, sn: serialNumber || '未找到單號' });
-                
-                // 即時渲染表格
-                const row = `<tr><td>${file.name}</td><td>${serialNumber || '<span style="color:red">未找到</span>'}</td></tr>`;
-                tbody.insertAdjacentHTML('beforeend', row);
-            } catch (error) {
-                console.error(error);
-                tbody.insertAdjacentHTML('beforeend', `<tr><td>${file.name}</td><td style="color:red">讀取失敗</td></tr>`);
-            }
+            await processFile(file);
         }
 
-        status.innerText = `處理完成！共計 ${files.length} 個檔案。`;
+        status.innerText = `處理完成！共偵測到 ${results.filter(r => r.sn !== '未找到').length} 組單號。`;
         copyBtn.disabled = false;
         downloadBtn.disabled = false;
+        fileInput.disabled = false;
     });
 
-async function processFullPdf(file) {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+    async function processFile(file) {
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
 
-    // 跑遍每一頁，不再只抓前三頁，也不需要手動拆分檔案
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        let text = await getPageText(page); // 嘗試抓取文字
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                status.innerText = `正在處理：${file.name} (第 ${pageNum}/${pdf.numPages} 頁)`;
+                const page = await pdf.getPage(pageNum);
+                
+                // 1. 嘗試提取文字層
+                let textContent = await page.getTextContent();
+                let text = textContent.items.map(item => item.str).join(" ");
+                let method = "文字層";
 
-        // 【自動 OCR 邏輯】
-        if (text.trim().length < 5) { 
-            // 如果沒文字，代表是圖片檔，啟動 OCR
-            text = await performOCR(page); 
+                // 2. 如果沒文字，啟動 OCR
+                if (text.replace(/\s+/g, '').length < 5) {
+                    method = "圖片辨識 (OCR)";
+                    text = await performOCR(page);
+                }
+
+                // 3. 搜尋單號
+                const sn = findMatch(text);
+                
+                // 4. 紀錄與渲染
+                results.push({ fileName: file.name, page: pageNum, sn: sn || '未找到', method });
+                const row = `<tr>
+                    <td>${file.name}</td>
+                    <td>第 ${pageNum} 頁</td>
+                    <td>${method === "圖片辨識 (OCR)" ? '<span class="tag-ocr">OCR</span>' : '文字'}</td>
+                    <td style="${!sn ? 'color:red' : 'font-weight:bold'}">${sn || '未找到'}</td>
+                </tr>`;
+                tbody.insertAdjacentHTML('beforeend', row);
+            }
+        } catch (err) {
+            console.error(err);
+            tbody.insertAdjacentHTML('beforeend', `<tr><td>${file.name}</td><td colspan="3" style="color:red">檔案讀取失敗</td></tr>`);
         }
+    }
 
-        const sn = findRRNumber(text); // 用原本的正則表達式找 RR 號
+    async function performOCR(page) {
+        const viewport = page.getViewport({ scale: 2.0 }); // 提高解析度增加辨識率
+        const context = ocrCanvas.getContext('2d');
+        ocrCanvas.height = viewport.height;
+        ocrCanvas.width = viewport.width;
+
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+        const imageData = ocrCanvas.toDataURL('image/png');
         
-        // 將「檔名 + 第幾頁 + 找到的單號」直接塞入結果表格
-        addResultToTable(file.name, i, sn);
+        const { data: { text } } = await Tesseract.recognize(imageData, 'chi_tra+eng');
+        return text;
     }
-}
 
-    // 清理 PDF 常見亂碼空白
-    fullText = fullText
-        .replace(/\s+/g, ' ')
-        .replace(/：/g, ':')
-        .trim();
-
-    /*
-    終極版抓法（依優先順序）
-
-    1. 客戶維修單號附近抓 RR號
-    2. SR單號附近抓 RR號
-    3. 全文抓 RR號
-    4. 抓 RMA / 維修格式
-    */
-
-    const patterns = [
-
-        // 客戶維修單號：TSC XXX-RR2603180068
-        /客戶維修單號\s*:?\s*.*?(RR\d{8,})/i,
-
-        // 維修單號：RR2603180068
-        /維修單號\s*:?\s*(RR\d{8,})/i,
-
-        // 單號：RR2603180068
-        /單號\s*:?\s*(RR\d{8,})/i,
-
-        // 任意位置 RR號（最泛用）
-        /\b(RR\d{8,})\b/i,
-
-        // 若有 RMA2603180068
-        /\b(RMA\d{6,})\b/i,
-
-        // 若有 REP2603180068
-        /\b(REP\d{6,})\b/i
-    ];
-
-    for (const regex of patterns) {
-        const match = fullText.match(regex);
-        if (match) {
-            return match[1] || match[0];
+    function findMatch(text) {
+        const cleanText = text.replace(/\s+/g, ' ').replace(/：/g, ':').trim();
+        for (const regex of patterns) {
+            const match = cleanText.match(regex);
+            if (match) return match[1] || match[0];
         }
+        return null;
     }
 
-    return null;
-}
-
-    // 複製功能
     copyBtn.addEventListener('click', () => {
-        const text = results.map(r => r.sn).join('\n');
-        navigator.clipboard.writeText(text).then(() => alert('已複製所有單號到剪貼簿'));
+        const text = results.filter(r => r.sn !== '未找到').map(r => r.sn).join('\n');
+        navigator.clipboard.writeText(text).then(() => alert('已複製所有找到的 RR 單號'));
     });
 
-    // 下載 CSV 功能
     downloadBtn.addEventListener('click', () => {
-        let csvContent = "data:text/csv;charset=utf-8,檔名,客戶維修單號\n";
+        let csvContent = "\ufeff檔名,頁次,辨識方式,客戶維修單號\n";
         results.forEach(r => {
-            csvContent += `${r.fileName},${r.sn}\n`;
+            csvContent += `${r.fileName},${r.page},${r.method},${r.sn}\n`;
         });
-        const encodedUri = encodeURI(csvContent);
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
+        link.href = URL.createObjectURL(blob);
         link.setAttribute("download", "維修單號抓取結果.csv");
-        document.body.appendChild(link);
         link.click();
     });
 </script>
